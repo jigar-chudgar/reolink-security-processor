@@ -1,10 +1,11 @@
 import os
 import io
+import shutil
 import subprocess
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
-from PIL import Image, ImageDraw, ImageFont
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from PIL import Image, ImageDraw
 
 
 SCOPES = [
@@ -24,6 +25,7 @@ drive = build(
     "v3",
     credentials=creds
 )
+
 
 
 def list_folders(parent_id):
@@ -58,6 +60,42 @@ def list_videos(folder_id):
 
 
 
+def find_or_create_folder(name, parent_id):
+
+    query = (
+        f"'{parent_id}' in parents "
+        f"and name='{name}' "
+        "and mimeType='application/vnd.google-apps.folder'"
+    )
+
+    result = drive.files().list(
+        q=query,
+        fields="files(id,name)"
+    ).execute()
+
+
+    files = result.get("files", [])
+
+    if files:
+        return files[0]["id"]
+
+
+    metadata = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [parent_id]
+    }
+
+
+    folder = drive.files().create(
+        body=metadata,
+        fields="id"
+    ).execute()
+
+    return folder["id"]
+
+
+
 def download_file(file_id, filename):
 
     request = drive.files().get_media(
@@ -74,6 +112,7 @@ def download_file(file_id, filename):
         done = False
 
         while not done:
+
             status, done = downloader.next_chunk()
 
             if status:
@@ -83,9 +122,12 @@ def download_file(file_id, filename):
 
 
 
-def create_contact_sheet(video_file, output_file):
+def extract_contact_sheet(video_file, jpg_file):
 
-    os.makedirs("frames", exist_ok=True)
+    work_dir = "frames_" + video_file.replace(".mp4","")
+
+    os.makedirs(work_dir, exist_ok=True)
+
 
     subprocess.run([
         "ffmpeg",
@@ -94,29 +136,35 @@ def create_contact_sheet(video_file, output_file):
         video_file,
         "-vf",
         "fps=1/6",
-        "frames/frame_%02d.jpg"
+        f"{work_dir}/frame_%02d.jpg"
     ],
     check=True)
 
 
-    images = []
+    images=[]
 
-    for filename in sorted(os.listdir("frames")):
+    for f in sorted(os.listdir(work_dir)):
 
-        if filename.endswith(".jpg"):
+        if f.endswith(".jpg"):
 
             img = Image.open(
-                "frames/" + filename
+                os.path.join(work_dir,f)
             )
 
-            img.thumbnail((320,180))
+            img.thumbnail(
+                (320,180)
+            )
 
             images.append(img)
 
 
+    width = 960
+    height = ((len(images)+2)//3)*220
+
+
     sheet = Image.new(
         "RGB",
-        (960, 400),
+        (width,height),
         "white"
     )
 
@@ -124,21 +172,71 @@ def create_contact_sheet(video_file, output_file):
     draw = ImageDraw.Draw(sheet)
 
 
-    for index, img in enumerate(images):
+    for i,img in enumerate(images):
 
-        x = (index % 3) * 320
-        y = (index // 3) * 200
+        x=(i%3)*320
+        y=(i//3)*220
 
         sheet.paste(img,(x,y))
 
         draw.text(
             (x+5,y+185),
-            f"{index*6} sec",
+            f"{i*6} sec",
             fill="black"
         )
 
 
-    sheet.save(output_file)
+    sheet.save(jpg_file)
+
+
+    shutil.rmtree(work_dir)
+
+
+
+def upload_file(filename, folder_id):
+
+    metadata = {
+        "name": filename,
+        "parents": [folder_id]
+    }
+
+
+    media = MediaFileUpload(
+        filename,
+        mimetype="image/jpeg"
+    )
+
+
+    result = drive.files().create(
+        body=metadata,
+        media_body=media,
+        fields="id"
+    ).execute()
+
+
+    return result["id"]
+
+
+
+def move_file(file_id, new_folder_id):
+
+    file = drive.files().get(
+        fileId=file_id,
+        fields="parents"
+    ).execute()
+
+
+    previous_parents = ",".join(
+        file.get("parents")
+    )
+
+
+    drive.files().update(
+        fileId=file_id,
+        addParents=new_folder_id,
+        removeParents=previous_parents,
+        fields="id, parents"
+    ).execute()
 
 
 
@@ -150,48 +248,84 @@ date_folders = list_folders(ROOT_FOLDER_ID)
 
 for date_folder in date_folders:
 
-    subfolders = list_folders(
-        date_folder["id"]
-    )
+    date_id = date_folder["id"]
+
+    subfolders = list_folders(date_id)
+
+
+    unprocessed_id = None
+
 
     for folder in subfolders:
 
         if folder["name"] == "UnprocessedVideos":
-
-            videos = list_videos(
-                folder["id"]
-            )
+            unprocessed_id = folder["id"]
 
 
-            for video in videos:
-
-                print(
-                    "Processing:",
-                    video["name"]
-                )
+    if not unprocessed_id:
+        continue
 
 
-                local_mp4 = video["name"]
-
-                download_file(
-                    video["id"],
-                    local_mp4
-                )
+    videos = list_videos(unprocessed_id)
 
 
-                jpg_name = (
-                    video["name"]
-                    .replace(".mp4",".jpg")
-                )
+    for video in videos:
+
+        print(
+            "Processing:",
+            video["name"]
+        )
 
 
-                create_contact_sheet(
-                    local_mp4,
-                    jpg_name
-                )
+        local_file = video["name"]
+
+        download_file(
+            video["id"],
+            local_file
+        )
 
 
-                print(
-                    "Created:",
-                    jpg_name
-                )
+        jpg_file = local_file.replace(
+            ".mp4",
+            ".jpg"
+        )
+
+
+        extract_contact_sheet(
+            local_file,
+            jpg_file
+        )
+
+
+        screenshots_id = find_or_create_folder(
+            "Screenshots",
+            date_id
+        )
+
+
+        processed_id = find_or_create_folder(
+            "ProcessedVideos",
+            date_id
+        )
+
+
+        upload_file(
+            jpg_file,
+            screenshots_id
+        )
+
+
+        move_file(
+            video["id"],
+            processed_id
+        )
+
+
+        os.remove(local_file)
+        os.remove(jpg_file)
+
+
+        print(
+            "Completed:",
+            video["name"]
+        )
