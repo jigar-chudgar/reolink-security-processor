@@ -1,14 +1,15 @@
-name: Test Google Drive Access
+name: Process Camera Videos
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-drive:
+  process:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+
+      - name: Checkout
         uses: actions/checkout@v5
 
       - name: Setup Python
@@ -16,14 +17,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install packages
         run: |
-          pip install google-api-python-client google-auth
+          pip install -r requirements.txt
 
-      - name: Create credentials file
+      - name: Create credentials
         run: |
           echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > service_account.json
 
-      - name: Test Drive connection
+      - name: Find videos
+        env:
+          REOLINK_DRIVE_ROOT_ID: ${{ secrets.REOLINK_DRIVE_ROOT_ID }}
         run: |
-          python test_drive.py
+          python process_videos.py
