@@ -3,6 +3,8 @@ name: Process Camera Videos
 on:
   workflow_dispatch:
 
+  schedule:
+    - cron: "*/5 * * * *"
 jobs:
   process:
     runs-on: ubuntu-latest
