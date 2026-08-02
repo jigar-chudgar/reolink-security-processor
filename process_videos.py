@@ -462,6 +462,9 @@ date_folders = list_folders(
     ROOT_FOLDER_ID
 )
 
+date_folders.sort(
+    key=lambda folder: folder["name"]
+)
 
 for date_folder in date_folders:
 
@@ -491,6 +494,10 @@ for date_folder in date_folders:
 
     videos = list_videos(
         unprocessed_id
+    )
+
+    videos.sort(
+         key=lambda video: video["name"].lower()
     )
 
 
