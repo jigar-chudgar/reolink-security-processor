@@ -72,6 +72,15 @@ def list_videos(folder_id):
 
 def download_file(file_id, filename):
 
+    # Get expected size from Drive metadata so we can verify
+    # the download actually completed fully.
+    file_meta = drive.files().get(
+        fileId=file_id,
+        fields="size"
+    ).execute()
+
+    expected_size = int(file_meta.get("size", 0))
+
     request = drive.files().get_media(
         fileId=file_id
     )
@@ -93,6 +102,46 @@ def download_file(file_id, filename):
                 print(
                     f"Downloaded {int(status.progress() * 100)}%"
                 )
+
+    actual_size = os.path.getsize(filename)
+
+    if expected_size and actual_size != expected_size:
+
+        raise RuntimeError(
+            f"Download size mismatch for {filename}: "
+            f"expected {expected_size} bytes, got {actual_size} bytes"
+        )
+
+
+def validate_mp4(video_file):
+
+    if not os.path.exists(video_file) or os.path.getsize(video_file) == 0:
+
+        raise RuntimeError(
+            f"{video_file} is missing or empty after download"
+        )
+
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            video_file
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0 or not result.stdout.strip():
+
+        raise RuntimeError(
+            f"ffprobe validation failed for {video_file}: "
+            f"{result.stderr.strip()}"
+        )
 
 
 def extract_contact_sheet(video_file, jpg_file):
@@ -134,6 +183,8 @@ def extract_contact_sheet(video_file, jpg_file):
             img.close()
 
     if not images:
+
+        shutil.rmtree(work_dir, ignore_errors=True)
 
         raise RuntimeError(
             "FFmpeg did not create any screenshots"
@@ -496,6 +547,9 @@ for date_folder in date_folders:
         unprocessed_id
     )
 
+    # Filenames are timestamp-first, e.g.
+    # 2026-08-02_22-16-41_Front_Door.mp4
+    # so alphabetical sort == chronological order.
     videos.sort(
          key=lambda video: video["name"].lower()
     )
@@ -519,9 +573,16 @@ for date_folder in date_folders:
 
         try:
 
-            # Download MP4
+            # Download MP4 (raises if size doesn't match Drive metadata)
             download_file(
                 video["id"],
+                local_file
+            )
+
+
+            # Validate the file is a complete, readable video
+            # before handing it to FFmpeg for frame extraction.
+            validate_mp4(
                 local_file
             )
 
@@ -547,11 +608,11 @@ for date_folder in date_folders:
             )
 
 
-            # Extract camera name and time
-            # from filename.
+            # Extract camera name and time from filename.
             #
-            # Example:
-            # Garage_2026-08-01_16-04-19.mp4
+            # Filenames are timestamp-first:
+            # 2026-08-02_22-16-41_Front_Door.mp4
+            # 2026-08-02_22-18-03_Garage.mp4
 
             name_without_extension = (
                 os.path.splitext(
@@ -567,11 +628,14 @@ for date_folder in date_folders:
 
             if len(parts) >= 3:
 
-                camera = parts[0]
+                date_part = parts[0]
 
-                date_part = parts[1]
+                time_part = parts[1]
 
-                time_part = parts[2]
+                # Everything after date/time is the camera name,
+                # joined back together in case it has underscores
+                # (e.g. "Front_Door" -> "Front Door").
+                camera = "_".join(parts[2:]).replace("_", " ")
 
                 time_display = (
                     date_part +
@@ -627,6 +691,22 @@ for date_folder in date_folders:
             )
 
 
+        except Exception as e:
+
+            # Isolate failures per-video so one bad file doesn't
+            # kill the whole run (and the summary email for
+            # everything else that succeeded).
+            #
+            # The video is NOT moved/marked processed, so it will
+            # simply be picked up and retried on the next run.
+
+            print(
+                f"FAILED processing {video['name']}: {e}"
+            )
+
+            continue
+
+
         finally:
 
             if os.path.exists(
@@ -654,8 +734,8 @@ for date_folder in date_folders:
 
 
 # ------------------------------------------------
-# All videos finished.
-# Send ONE summary email.
+# All videos finished (or failed individually).
+# Send ONE summary email for whatever succeeded.
 # ------------------------------------------------
 
 send_summary_email()
