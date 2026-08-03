@@ -5,6 +5,11 @@ on:
 
   schedule:
     - cron: "3,13,23,33,43,53 * * * *"
+
+concurrency:
+  group: reolink-video-processing
+  cancel-in-progress: false
+
 jobs:
   process:
     runs-on: ubuntu-latest
