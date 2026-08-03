@@ -23,6 +23,14 @@ APPS_SCRIPT_URL = os.environ["REOLINK_APPS_SCRIPT_URL"]
 
 WEBAPP_TOKEN = os.environ["REOLINK_WEBAPP_TOKEN"]
 
+# Maximum number of times a video is retried after a failure
+# before it is given up on and moved to ProcessedVideos anyway.
+MAX_RETRIES = 3
+
+# Number of evenly-spaced frames to capture per video for the
+# contact sheet, regardless of the video's exact duration.
+CONTACT_SHEET_FRAME_COUNT = 6
+
 
 creds = service_account.Credentials.from_service_account_file(
     "service_account.json",
@@ -38,6 +46,46 @@ drive = build(
 
 # Stores screenshots for this GitHub run
 processed_screenshots = []
+
+# Stores videos that were given up on after MAX_RETRIES failures,
+# so a lightweight note can be included in the summary email.
+failed_videos = []
+
+
+def parse_camera_and_time(video_name, date_name):
+
+    # Filenames are timestamp-first:
+    # 2026-08-02_22-16-41_Front_Door.mp4
+    # 2026-08-02_22-18-03_Garage.mp4
+
+    name_without_extension = os.path.splitext(video_name)[0]
+
+    parts = name_without_extension.split("_")
+
+    if len(parts) >= 3:
+
+        date_part = parts[0]
+
+        time_part = parts[1]
+
+        # Everything after date/time is the camera name,
+        # joined back together in case it has underscores
+        # (e.g. "Front_Door" -> "Front Door").
+        camera = "_".join(parts[2:]).replace("_", " ")
+
+        time_display = (
+            date_part +
+            " " +
+            time_part.replace("-", ":")
+        )
+
+    else:
+
+        camera = "Camera"
+
+        time_display = date_name
+
+    return camera, time_display
 
 
 def list_folders(parent_id):
@@ -143,8 +191,28 @@ def validate_mp4(video_file):
             f"{result.stderr.strip()}"
         )
 
+    try:
 
-def extract_contact_sheet(video_file, jpg_file):
+        duration = float(result.stdout.strip())
+
+    except ValueError:
+
+        raise RuntimeError(
+            f"ffprobe returned a non-numeric duration for "
+            f"{video_file}: {result.stdout.strip()}"
+        )
+
+    if duration <= 0:
+
+        raise RuntimeError(
+            f"ffprobe reported an invalid duration ({duration}) "
+            f"for {video_file}"
+        )
+
+    return duration
+
+
+def extract_contact_sheet(video_file, jpg_file, duration):
 
     work_dir = (
         "frames_" +
@@ -153,13 +221,23 @@ def extract_contact_sheet(video_file, jpg_file):
 
     os.makedirs(work_dir, exist_ok=True)
 
+    # Compute an interval that yields CONTACT_SHEET_FRAME_COUNT
+    # evenly-spaced frames across the video's actual duration,
+    # instead of assuming every clip is exactly 30 seconds.
+    interval = max(
+        duration / CONTACT_SHEET_FRAME_COUNT,
+        0.1
+    )
+
+    fps = 1 / interval
+
     subprocess.run([
         "ffmpeg",
         "-y",
         "-i",
         video_file,
         "-vf",
-        "fps=1/6",
+        f"fps={fps}",
         f"{work_dir}/frame_%02d.jpg"
     ], check=True)
 
@@ -227,7 +305,7 @@ def extract_contact_sheet(video_file, jpg_file):
 
         draw.text(
             (x + 5, y + 185),
-            f"{i * 6} sec",
+            f"{i * interval:.1f} sec",
             fill="black"
         )
 
@@ -324,7 +402,7 @@ def send_to_apps_script(
 
 def send_summary_email():
 
-    if not processed_screenshots:
+    if not processed_screenshots and not failed_videos:
 
         print(
             "No videos processed. "
@@ -336,7 +414,8 @@ def send_summary_email():
 
     print(
         f"Sending summary email with "
-        f"{len(processed_screenshots)} event(s)..."
+        f"{len(processed_screenshots)} event(s) and "
+        f"{len(failed_videos)} failed video(s)..."
     )
 
 
@@ -371,7 +450,10 @@ def send_summary_email():
             "email",
 
         "screenshots":
-            screenshots
+            screenshots,
+
+        "failed":
+            failed_videos
 
     }
 
@@ -475,6 +557,30 @@ def find_or_create_folder(
 
 
     return folder["id"]
+
+
+def get_retry_count(file_id):
+
+    file = drive.files().get(
+        fileId=file_id,
+        fields="appProperties"
+    ).execute()
+
+    props = file.get("appProperties") or {}
+
+    return int(props.get("retry_count", 0))
+
+
+def set_retry_count(file_id, count):
+
+    drive.files().update(
+        fileId=file_id,
+        body={
+            "appProperties": {
+                "retry_count": str(count)
+            }
+        }
+    ).execute()
 
 
 def move_file(
@@ -582,7 +688,7 @@ for date_folder in date_folders:
 
             # Validate the file is a complete, readable video
             # before handing it to FFmpeg for frame extraction.
-            validate_mp4(
+            duration = validate_mp4(
                 local_file
             )
 
@@ -590,7 +696,8 @@ for date_folder in date_folders:
             # Create contact sheet
             extract_contact_sheet(
                 local_file,
-                jpg_file
+                jpg_file,
+                duration
             )
 
 
@@ -609,48 +716,10 @@ for date_folder in date_folders:
 
 
             # Extract camera name and time from filename.
-            #
-            # Filenames are timestamp-first:
-            # 2026-08-02_22-16-41_Front_Door.mp4
-            # 2026-08-02_22-18-03_Garage.mp4
-
-            name_without_extension = (
-                os.path.splitext(
-                    video["name"]
-                )[0]
+            camera, time_display = parse_camera_and_time(
+                video["name"],
+                date_name
             )
-
-
-            parts = name_without_extension.split(
-                "_"
-            )
-
-
-            if len(parts) >= 3:
-
-                date_part = parts[0]
-
-                time_part = parts[1]
-
-                # Everything after date/time is the camera name,
-                # joined back together in case it has underscores
-                # (e.g. "Front_Door" -> "Front Door").
-                camera = "_".join(parts[2:]).replace("_", " ")
-
-                time_display = (
-                    date_part +
-                    " " +
-                    time_part.replace(
-                        "-",
-                        ":"
-                    )
-                )
-
-            else:
-
-                camera = "Camera"
-
-                time_display = date_name
 
 
             processed_screenshots.append({
@@ -696,13 +765,65 @@ for date_folder in date_folders:
             # Isolate failures per-video so one bad file doesn't
             # kill the whole run (and the summary email for
             # everything else that succeeded).
-            #
-            # The video is NOT moved/marked processed, so it will
-            # simply be picked up and retried on the next run.
 
             print(
                 f"FAILED processing {video['name']}: {e}"
             )
+
+            try:
+
+                retry_count = get_retry_count(video["id"]) + 1
+
+                if retry_count >= MAX_RETRIES:
+
+                    print(
+                        f"Giving up on {video['name']} after "
+                        f"{retry_count} failed attempts. "
+                        "Moving to ProcessedVideos without a screenshot."
+                    )
+
+                    camera, time_display = parse_camera_and_time(
+                        video["name"],
+                        date_name
+                    )
+
+                    failed_videos.append({
+                        "filename": video["name"],
+                        "camera": camera,
+                        "time": time_display,
+                        "attempts": retry_count
+                    })
+
+                    processed_id = find_or_create_folder(
+                        "ProcessedVideos",
+                        date_id
+                    )
+
+                    move_file(
+                        video["id"],
+                        processed_id
+                    )
+
+                else:
+
+                    set_retry_count(
+                        video["id"],
+                        retry_count
+                    )
+
+                    print(
+                        f"Recorded retry {retry_count}/{MAX_RETRIES} "
+                        f"for {video['name']}. Will retry next run."
+                    )
+
+            except Exception as retry_error:
+
+                # Don't let a failure in the retry-tracking logic
+                # itself take down the whole run.
+                print(
+                    f"Could not update retry tracking for "
+                    f"{video['name']}: {retry_error}"
+                )
 
             continue
 
