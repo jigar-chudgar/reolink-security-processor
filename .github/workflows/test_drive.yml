@@ -1,11 +1,10 @@
 name: Process Camera Videos
-
 on:
   workflow_dispatch:
-
+  repository_dispatch:
+    types: [reolink-video-ready]
   schedule:
-    - cron: "3,13,23,33,43,53 * * * *"
-
+    - cron: "*/30 * * * *"   # safety net only — primary trigger is repository_dispatch
 concurrency:
   group: reolink-video-processing
   cancel-in-progress: false
