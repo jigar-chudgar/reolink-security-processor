@@ -6,6 +6,8 @@ import subprocess
 import urllib.request
 import base64
 
+from datetime import datetime, timedelta
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -30,6 +32,20 @@ MAX_RETRIES = 3
 # Number of evenly-spaced frames to capture per video for the
 # contact sheet, regardless of the video's exact duration.
 CONTACT_SHEET_FRAME_COUNT = 6
+
+# Contact sheet layout / resolution. Fewer columns means each
+# photo displays bigger in the email (the email caps display
+# width, so column count controls perceived size more than
+# raw resolution does).
+CONTACT_SHEET_COLUMNS = 2
+THUMBNAIL_MAX_SIZE = (480, 270)
+CELL_WIDTH = 480
+CELL_HEIGHT = 320
+JPEG_QUALITY = 88
+
+# Date folders older than this are deleted entirely (videos,
+# screenshots, everything) on each run.
+RETENTION_DAYS = 15
 
 
 creds = service_account.Credentials.from_service_account_file(
@@ -254,7 +270,7 @@ def extract_contact_sheet(video_file, jpg_file, duration):
 
             img = Image.open(path)
 
-            img.thumbnail((320, 180))
+            img.thumbnail(THUMBNAIL_MAX_SIZE)
 
             images.append(img.copy())
 
@@ -268,9 +284,9 @@ def extract_contact_sheet(video_file, jpg_file, duration):
             "FFmpeg did not create any screenshots"
         )
 
-    columns = 3
-    cell_width = 320
-    cell_height = 220
+    columns = CONTACT_SHEET_COLUMNS
+    cell_width = CELL_WIDTH
+    cell_height = CELL_HEIGHT
 
     rows = (
         len(images) +
@@ -304,14 +320,16 @@ def extract_contact_sheet(video_file, jpg_file, duration):
         )
 
         draw.text(
-            (x + 5, y + 185),
+            (x + 5, y + THUMBNAIL_MAX_SIZE[1] + 5),
             f"{i * interval:.1f} sec",
             fill="black"
         )
 
     sheet.save(
         jpg_file,
-        "JPEG"
+        "JPEG",
+        quality=JPEG_QUALITY,
+        optimize=True
     )
 
     shutil.rmtree(
@@ -610,6 +628,60 @@ def move_file(
     ).execute()
 
 
+def delete_old_date_folders(date_folders):
+
+    # Deletes date folders (and everything inside them) older
+    # than RETENTION_DAYS. Folder names are expected in
+    # YYYY-MM-DD format; anything that doesn't parse as a date
+    # is left alone rather than risk deleting the wrong thing.
+
+    cutoff_date = (
+        datetime.utcnow().date() -
+        timedelta(days=RETENTION_DAYS)
+    )
+
+    for date_folder in date_folders:
+
+        date_name = date_folder["name"]
+
+        try:
+
+            folder_date = datetime.strptime(
+                date_name,
+                "%Y-%m-%d"
+            ).date()
+
+        except ValueError:
+
+            print(
+                f"Skipping cleanup for '{date_name}' "
+                "(not a YYYY-MM-DD folder name)"
+            )
+
+            continue
+
+        if folder_date < cutoff_date:
+
+            print(
+                f"Deleting '{date_name}' "
+                f"(older than {RETENTION_DAYS} days)"
+            )
+
+            try:
+
+                # Deleting a folder via the Drive API also
+                # deletes everything inside it.
+                drive.files().delete(
+                    fileId=date_folder["id"]
+                ).execute()
+
+            except Exception as e:
+
+                print(
+                    f"Failed to delete '{date_name}': {e}"
+                )
+
+
 print(
     "Searching videos..."
 )
@@ -860,3 +932,14 @@ for date_folder in date_folders:
 # ------------------------------------------------
 
 send_summary_email()
+
+
+# ------------------------------------------------
+# Clean up old data past the retention window.
+# ------------------------------------------------
+
+print(
+    f"\nChecking for folders older than {RETENTION_DAYS} days..."
+)
+
+delete_old_date_folders(date_folders)
