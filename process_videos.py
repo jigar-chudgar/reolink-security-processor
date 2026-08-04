@@ -454,7 +454,10 @@ def send_summary_email():
                 item["time"],
 
             "image":
-                item["image"]
+                item["image"],
+
+            "videoLink":
+                item.get("videoLink")
 
         })
 
@@ -628,6 +631,21 @@ def move_file(
     ).execute()
 
 
+def get_video_link(file_id):
+
+    # Returns Drive's built-in "view in browser" link for the
+    # file. Relies on the file already being accessible to
+    # whoever opens it (e.g. via the shared ReoLinkSecurityCamera
+    # folder), same as browsing to it manually in Drive.
+
+    file = drive.files().get(
+        fileId=file_id,
+        fields="webViewLink"
+    ).execute()
+
+    return file.get("webViewLink")
+
+
 def delete_old_date_folders(date_folders):
 
     # Deletes date folders (and everything inside them) older
@@ -794,23 +812,6 @@ for date_folder in date_folders:
             )
 
 
-            processed_screenshots.append({
-
-                "filename":
-                    jpg_file,
-
-                "camera":
-                    camera,
-
-                "time":
-                    time_display,
-
-                "image":
-                    image_base64
-
-            })
-
-
             # Find/create ProcessedVideos
             processed_id = (
                 find_or_create_folder(
@@ -825,6 +826,33 @@ for date_folder in date_folders:
                 video["id"],
                 processed_id
             )
+
+
+            # Grab a shareable link to the now-moved video so it
+            # can be included in the summary email.
+            video_link = get_video_link(
+                video["id"]
+            )
+
+
+            processed_screenshots.append({
+
+                "filename":
+                    jpg_file,
+
+                "camera":
+                    camera,
+
+                "time":
+                    time_display,
+
+                "image":
+                    image_base64,
+
+                "videoLink":
+                    video_link
+
+            })
 
 
             print(
