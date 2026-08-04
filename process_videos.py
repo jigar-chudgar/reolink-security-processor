@@ -650,10 +650,13 @@ def get_video_link(file_id):
 
 def delete_old_date_folders(date_folders):
 
-    # Deletes date folders (and everything inside them) older
-    # than RETENTION_DAYS. Folder names are expected in
-    # YYYY-MM-DD format; anything that doesn't parse as a date
-    # is left alone rather than risk deleting the wrong thing.
+    # Moves date folders (and everything inside them) to Trash
+    # once they're older than RETENTION_DAYS, rather than
+    # deleting permanently — gives a grace period to recover
+    # something before Google's Trash auto-purges it (~30 days).
+    # Folder names are expected in YYYY-MM-DD format; anything
+    # that doesn't parse as a date is left alone rather than
+    # risk trashing the wrong thing.
 
     cutoff_date = (
         datetime.utcnow().date() -
@@ -683,22 +686,23 @@ def delete_old_date_folders(date_folders):
         if folder_date < cutoff_date:
 
             print(
-                f"Deleting '{date_name}' "
+                f"Moving '{date_name}' to Trash "
                 f"(older than {RETENTION_DAYS} days)"
             )
 
             try:
 
-                # Deleting a folder via the Drive API also
-                # deletes everything inside it.
-                drive.files().delete(
-                    fileId=date_folder["id"]
+                # Trashing a folder via the Drive API also
+                # trashes everything inside it.
+                drive.files().update(
+                    fileId=date_folder["id"],
+                    body={"trashed": True}
                 ).execute()
 
             except Exception as e:
 
                 print(
-                    f"Failed to delete '{date_name}': {e}"
+                    f"Failed to trash '{date_name}': {e}"
                 )
 
 
