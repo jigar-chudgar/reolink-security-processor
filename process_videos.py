@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import urllib.request
 import base64
+import time
 
 from datetime import datetime, timedelta
 
@@ -337,6 +338,65 @@ def extract_contact_sheet(video_file, jpg_file, duration):
     )
 
 
+def call_apps_script(payload, timeout=120, max_attempts=3, retry_delay_seconds=5):
+
+    # POSTs to Apps Script and parses the JSON response. Apps
+    # Script web apps are known to intermittently return an
+    # HTML error page (via a flaky internal redirect) instead
+    # of the actual script output, even when the request itself
+    # was fine. Retrying a couple of times handles that without
+    # treating it as a hard failure on the first hiccup.
+
+    data = json.dumps(payload).encode("utf-8")
+
+    last_error = None
+
+    for attempt in range(1, max_attempts + 1):
+
+        try:
+
+            request = urllib.request.Request(
+                APPS_SCRIPT_URL,
+                data=data,
+                headers={
+                    "Content-Type": "application/json"
+                },
+                method="POST"
+            )
+
+            with urllib.request.urlopen(
+                request,
+                timeout=timeout
+            ) as response:
+
+                response_text = (
+                    response.read()
+                    .decode("utf-8")
+                )
+
+            result = json.loads(response_text)
+
+            return result
+
+        except Exception as e:
+
+            last_error = e
+
+            print(
+                f"Apps Script call failed on attempt "
+                f"{attempt}/{max_attempts}: {e}"
+            )
+
+            if attempt < max_attempts:
+
+                time.sleep(retry_delay_seconds)
+
+    raise RuntimeError(
+        f"Apps Script call failed after {max_attempts} "
+        f"attempts: {last_error}"
+    )
+
+
 def send_to_apps_script(
     date,
     filename,
@@ -363,41 +423,12 @@ def send_to_apps_script(
     }
 
 
-    data = json.dumps(
-        payload
-    ).encode("utf-8")
-
-
-    request = urllib.request.Request(
-        APPS_SCRIPT_URL,
-        data=data,
-        headers={
-            "Content-Type":
-                "application/json"
-        },
-        method="POST"
-    )
-
-
-    with urllib.request.urlopen(
-        request,
-        timeout=120
-    ) as response:
-
-        response_text = (
-            response.read()
-            .decode("utf-8")
-        )
+    result = call_apps_script(payload)
 
 
     print(
         "Apps Script response:",
-        response_text
-    )
-
-
-    result = json.loads(
-        response_text
+        result
     )
 
 
@@ -479,41 +510,12 @@ def send_summary_email():
     }
 
 
-    data = json.dumps(
-        payload
-    ).encode("utf-8")
-
-
-    request = urllib.request.Request(
-        APPS_SCRIPT_URL,
-        data=data,
-        headers={
-            "Content-Type":
-                "application/json"
-        },
-        method="POST"
-    )
-
-
-    with urllib.request.urlopen(
-        request,
-        timeout=120
-    ) as response:
-
-        response_text = (
-            response.read()
-            .decode("utf-8")
-        )
+    result = call_apps_script(payload)
 
 
     print(
         "Email response:",
-        response_text
-    )
-
-
-    result = json.loads(
-        response_text
+        result
     )
 
 
@@ -959,7 +961,23 @@ for date_folder in date_folders:
 # Send ONE summary email for whatever succeeded.
 # ------------------------------------------------
 
-send_summary_email()
+email_failed = False
+
+try:
+
+    send_summary_email()
+
+except Exception as e:
+
+    # Videos were already downloaded, screenshotted, and moved
+    # successfully above — don't let a flaky email delivery
+    # erase that work or crash before cleanup runs.
+
+    email_failed = True
+
+    print(
+        f"\nFAILED to send summary email: {e}"
+    )
 
 
 # ------------------------------------------------
@@ -971,3 +989,13 @@ print(
 )
 
 delete_old_date_folders(date_folders)
+
+
+if email_failed:
+
+    # Still surface this as a failed run in GitHub Actions so
+    # it's noticed, but only after everything else completed.
+    raise SystemExit(
+        "Video processing succeeded but the summary email "
+        "failed to send after retries. See log above."
+    )
