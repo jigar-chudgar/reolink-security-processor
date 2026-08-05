@@ -38,7 +38,7 @@ CONTACT_SHEET_FRAME_COUNT = 6
 # photo displays bigger in the email (the email caps display
 # width, so column count controls perceived size more than
 # raw resolution does).
-CONTACT_SHEET_COLUMNS = 2
+CONTACT_SHEET_COLUMNS = 1
 THUMBNAIL_MAX_SIZE = (480, 270)
 CELL_WIDTH = 480
 CELL_HEIGHT = 320
