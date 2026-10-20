@@ -3,8 +3,8 @@ on:
   workflow_dispatch:
   repository_dispatch:
     types: [reolink-video-ready]
-  schedule:
-    - cron: "*/30 * * * *"   # safety net only — primary trigger is repository_dispatch
+  # schedule:
+  #   - cron: "*/30 * * * *"   # safety net only — primary trigger is repository_dispatch
 permissions:
   contents: read
 concurrency:
